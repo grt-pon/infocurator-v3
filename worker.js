@@ -256,6 +256,30 @@ async function generateInsights(item, apiKey) {
 //   実装後は GURUTTOPON_CONTEXT の代わりにこちらを使用
 // }
 
+// ─── KV 読み書き ──────────────────────────────────────────────
+const KV_KEY     = 'articles';
+const KV_MAX     = 100; // 保存上限件数
+
+async function loadFromKV(env) {
+  try {
+    const raw = await env.ARTICLES_KV.get(KV_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveToKV(env, articles) {
+  await env.ARTICLES_KV.put(KV_KEY, JSON.stringify(articles));
+}
+
+// 新記事を先頭に追加し URL で重複除去。KV_MAX 件を上限に保持
+function mergeArticles(existing, incoming) {
+  const seen = new Set(existing.map((a) => a.url));
+  const novel = incoming.filter((a) => a.url && !seen.has(a.url));
+  return [...novel, ...existing].slice(0, KV_MAX);
+}
+
 // ─── メインハンドラ ───────────────────────────────────────────
 export default {
   async fetch(request, env) {
@@ -266,13 +290,26 @@ export default {
       return new Response('Method Not Allowed', { status: 405, headers: CORS });
     }
 
+    const { searchParams } = new URL(request.url);
+    const isCollect = searchParams.get('collect') === '1';
+
     try {
+      // ── 保存済み記事を返すだけ（ページ初期表示）──
+      if (!isCollect) {
+        const saved = await loadFromKV(env);
+        return new Response(
+          JSON.stringify({ articles: saved, fetchedAt: null, total: saved.length }),
+          { headers: { ...CORS, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // ── 新規収集 → KV に保存 → 全件返却 ──
       if (!env.CLAUDE_API_KEY) {
         throw new Error('CLAUDE_API_KEY が設定されていません');
       }
 
       // 1. RSS を並列取得
-      const arrays = await Promise.all(RSS_SOURCES.map(fetchRSS));
+      const arrays   = await Promise.all(RSS_SOURCES.map(fetchRSS));
       const allItems = arrays.flat();
 
       // 2. Haiku で D-1 テーマフィルタ
@@ -280,11 +317,21 @@ export default {
       const capped   = filtered.slice(0, 6); // 最大 6 件（コスト上限）
 
       // 3. Sonnet でコンセプト・企画ヒント生成（並列）
-      const results  = await Promise.all(capped.map((item) => generateInsights(item, env.CLAUDE_API_KEY)));
-      const articles = results.filter(Boolean);
+      const results    = await Promise.all(capped.map((item) => generateInsights(item, env.CLAUDE_API_KEY)));
+      const newArticles = results.filter(Boolean);
+
+      // 4. KV の既存記事とマージして保存
+      const existing = await loadFromKV(env);
+      const merged   = mergeArticles(existing, newArticles);
+      await saveToKV(env, merged);
 
       return new Response(
-        JSON.stringify({ articles, fetchedAt: new Date().toISOString(), total: articles.length }),
+        JSON.stringify({
+          articles:   merged,
+          fetchedAt:  new Date().toISOString(),
+          newCount:   newArticles.length,
+          total:      merged.length,
+        }),
         { headers: { ...CORS, 'Content-Type': 'application/json' } }
       );
     } catch (err) {
