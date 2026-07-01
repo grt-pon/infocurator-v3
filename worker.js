@@ -6,10 +6,10 @@
 
 // ─── RSS ソース定義 ────────────────────────────────────────────
 const RSS_SOURCES = [
-  { name: 'AdverTimes',        url: 'https://www.advertimes.com/feed/' },
-  { name: 'MarkeZine',         url: 'https://markezine.jp/rss/index.rss' },
-  { name: 'DIGIDAY Japan',     url: 'https://digiday.jp/feed/' },
-  { name: 'ITmedia Marketing', url: 'https://marketing.itmedia.co.jp/mm/rss/marketing/' },
+  { name: 'AdverTimes',    url: 'https://www.advertimes.com/feed/' },
+  { name: 'DIGIDAY Japan', url: 'https://digiday.jp/feed/' },
+  { name: 'Web担当者Forum', url: 'https://webtan.impress.co.jp/rss.xml' },
+  { name: 'btrax Blog',    url: 'https://blog.btrax.com/jp/feed/' },
 ];
 
 // ─── CORS ────────────────────────────────────────────────────
