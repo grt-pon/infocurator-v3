@@ -6,10 +6,12 @@
 
 // ─── RSS ソース定義 ────────────────────────────────────────────
 const RSS_SOURCES = [
-  { name: 'AdverTimes',    url: 'https://www.advertimes.com/feed/' },
-  { name: 'DIGIDAY Japan', url: 'https://digiday.jp/feed/' },
-  { name: 'Web担当者Forum', url: 'https://webtan.impress.co.jp/rss.xml' },
-  { name: 'btrax Blog',    url: 'https://blog.btrax.com/jp/feed/' },
+  { name: 'AdverTimes',        url: 'https://www.advertimes.com/feed/' },
+  { name: 'DIGIDAY Japan',     url: 'https://digiday.jp/feed/' },
+  { name: 'Web担当者Forum',     url: 'https://webtan.impress.co.jp/rss.xml' },
+  { name: 'btrax Blog',        url: 'https://blog.btrax.com/jp/feed/' },
+  { name: 'Yahoo!ビジネス',     url: 'https://news.yahoo.co.jp/rss/topics/business.xml' },
+  { name: '流通ニュース',        url: 'https://www.ryutsuu.biz/feed' },
 ];
 
 // ─── CORS ────────────────────────────────────────────────────
