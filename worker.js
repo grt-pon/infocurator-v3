@@ -1,6 +1,8 @@
 // ぐるっとポン 情報収集ツール - Cloudflare Worker
-// 環境変数: CLAUDE_API_KEY（必須）
-// 将来追加: GOOGLE_DRIVE_API_KEY, GOOGLE_DRIVE_FOLDER_ID
+// 環境変数（必須）: CLAUDE_API_KEY
+// 環境変数（任意）: GOOGLE_DRIVE_D1_FILE_ID   … 00_D1テーマリスト（Google Docs）のファイルID
+// 環境変数（任意）: GOOGLE_DRIVE_FILE_IDS     … ナレッジファイルのファイルID（カンマ区切りで複数可）
+// ※ Drive 環境変数が未設定の場合はworker.js内のフォールバック固定文を使用
 
 // ─── RSS ソース定義 ────────────────────────────────────────────
 const RSS_SOURCES = [
@@ -78,12 +80,10 @@ const GURUTTOPON_CONTEXT = `
 - ペットボトル・缶のポイント化要望 → スーパーとの期間限定連携提案に転用可
 `.trim();
 
-// ─── D-1 フィルタリングプロンプト（Haiku 向け・低コスト） ─────
-const D1_FILTER_PROMPT = `あなたはマーケティング情報のフィルタリングAIです。
-以下の記事タイトルリストを評価し、ぐるっとポン（リサイクルポイントアプリ、40〜60代主婦・ファミリー層向け）の
-マーケティング担当者にとって企画立案の参考になる記事のインデックス番号のみを返してください。
-
-有益な基準：
+// ─── D-1 フィルタリング（Haiku 向け） ────────────────────────────
+// テーマリストは Google Drive（GOOGLE_DRIVE_D1_FILE_ID）から取得。
+// 取得できない場合は以下のフォールバックを使用。
+const D1_THEMES_FALLBACK = `有益な基準：
 - スーパー・小売業の集客・販促トレンド
 - 企業間タイアップ・コラボ施策の事例
 - 地上・OOH・店頭広告施策
@@ -100,24 +100,34 @@ const D1_FILTER_PROMPT = `あなたはマーケティング情報のフィルタ
 - 富裕層・高価格帯向け
 - IT・テクノロジー系の技術動向
 - 海外のみで国内転用困難
-- 若年層向けIPコンテンツ
+- 若年層向けIPコンテンツ`;
+
+function buildD1FilterPrompt(d1Themes) {
+  return `あなたはマーケティング情報のフィルタリングAIです。
+以下の記事タイトルリストを評価し、ぐるっとポン（リサイクルポイントアプリ、40〜60代主婦・ファミリー層向け）の
+マーケティング担当者にとって企画立案の参考になる記事のインデックス番号のみを返してください。
+
+${d1Themes}
 
 記事タイトルリスト：
 {TITLES}
 
 インデックス番号のみの JSON 配列で返してください（例：[0,2,4]）。説明不要。`;
+}
 
 // ─── コンセプト・企画ヒント生成プロンプト（Sonnet 向け） ────────
-const CONVERSION_PROMPT = `あなたはぐるっとポンのマーケティング担当者のアシスタントです。
+// context: 基本情報＋記事に関連するナレッジセクションを組み立てた文字列
+function buildConversionPrompt(item, body, context) {
+  return `あなたはぐるっとポンのマーケティング担当者のアシスタントです。
 
-${GURUTTOPON_CONTEXT}
+${context}
 
 ---
 
 【分析対象記事】
-タイトル：{TITLE}
+タイトル：${item.title}
 本文：
-{BODY}
+${body || `（本文取得不可。タイトルから推定）${item.title}`}
 
 ---
 
@@ -130,6 +140,7 @@ ${GURUTTOPON_CONTEXT}
   "theme": "最も関連するテーマID（retail/tieup/ooh/passive/loyalty/gamification/campaign/target/recycle/points のいずれか1つ）",
   "themeLabel": "テーマの短い日本語名（例：ロイヤルティ設計）"
 }`;
+}
 
 // ─── RSS フェッチ & パース ──────────────────────────────────────
 function parseRSSItems(xml) {
@@ -163,10 +174,10 @@ async function fetchRSS(source) {
 }
 
 // ─── D-1 フィルタ（Haiku 一括評価） ─────────────────────────────
-async function filterByD1(items, apiKey) {
+async function filterByD1(items, apiKey, d1Themes) {
   if (!items.length) return [];
   const titles = items.map((item, i) => `${i}: ${item.title}`).join('\n');
-  const prompt = D1_FILTER_PROMPT.replace('{TITLES}', titles);
+  const prompt = buildD1FilterPrompt(d1Themes).replace('{TITLES}', titles);
 
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -225,12 +236,142 @@ async function scrapeArticle(url) {
   }
 }
 
+// ─── Google Drive ファイル取得（単体）────────────────────────────
+// Google Docs（/document/d/）は export?format=txt、それ以外は直接ダウンロードで取得
+async function fetchSingleDriveFile(fileId) {
+  // まず Google Docs エクスポート URL を試す
+  const docsUrl = `https://docs.google.com/document/d/${fileId}/export?format=txt`;
+  try {
+    const res = await fetch(docsUrl, { cf: { cacheTtl: 300 } });
+    if (res.ok) {
+      const text = await res.text();
+      // リダイレクト確認画面が返ってきていないかチェック
+      if (!text.includes('<!DOCTYPE') && text.length > 50) return text;
+    }
+  } catch { /* fall through */ }
+
+  // 次に直接ダウンロード URL を試す（.md ファイル等）
+  const dlUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+  try {
+    const res = await fetch(dlUrl, { cf: { cacheTtl: 300 } });
+    if (res.ok) {
+      const text = await res.text();
+      if (!text.includes('<!DOCTYPE') && text.length > 50) return text;
+    }
+  } catch { /* fall through */ }
+
+  return null;
+}
+
+// ─── D-1 テーマリストを Drive から取得（GOOGLE_DRIVE_D1_FILE_ID）────
+async function fetchD1Themes(env) {
+  if (!env.GOOGLE_DRIVE_D1_FILE_ID) return null;
+  try {
+    const text = await fetchSingleDriveFile(env.GOOGLE_DRIVE_D1_FILE_ID);
+    return text || null;
+  } catch {
+    return null;
+  }
+}
+
+// ─── ナレッジファイルを Drive から全件取得（GOOGLE_DRIVE_FILE_IDS）──
+// GOOGLE_DRIVE_FILE_IDS: カンマ区切りで複数のファイルIDを指定可能
+async function fetchAllKnowledgeFiles(env) {
+  const ids = [
+    ...(env.GOOGLE_DRIVE_FILE_IDS
+      ? env.GOOGLE_DRIVE_FILE_IDS.split(',').map((s) => s.trim()).filter(Boolean)
+      : []),
+    // 旧環境変数（GOOGLE_DRIVE_FILE_ID）との後方互換
+    ...(env.GOOGLE_DRIVE_FILE_ID && !env.GOOGLE_DRIVE_FILE_IDS
+      ? [env.GOOGLE_DRIVE_FILE_ID]
+      : []),
+  ];
+  if (!ids.length) return null;
+
+  const results = await Promise.all(ids.map(fetchSingleDriveFile));
+  const combined = results.filter(Boolean).join('\n\n');
+  return combined || null;
+}
+
+// ─── Markdown を ## 見出し単位でセクション分割 ────────────────────
+function parseSections(markdown) {
+  const sections = [];
+  const lines = markdown.split('\n');
+  let current = null;
+  for (const line of lines) {
+    const m = line.match(/^##\s+(.+)/);
+    if (m) {
+      if (current) sections.push(current);
+      current = { heading: m[1].trim(), body: '' };
+    } else if (current) {
+      current.body += line + '\n';
+    }
+  }
+  if (current) sections.push(current);
+  return sections.map((s) => ({ heading: s.heading, body: s.body.trim() }));
+}
+
+// ─── 基本情報セクション（常時使用）と、その他セクション（選択式）に分離 ─
+function splitCoreAndOptional(sections) {
+  const core = sections.filter((s) => s.heading.includes('基本情報'));
+  const optional = sections.filter((s) => !s.heading.includes('基本情報'));
+  return { core, optional };
+}
+
+// ─── 記事ごとに関連セクションを Haiku で選択（バッチ1回で全記事分） ─
+async function selectRelevantSections(items, optionalSections, apiKey) {
+  if (!optionalSections.length || !items.length) return items.map(() => []);
+
+  const sectionList = optionalSections.map((s, i) => `${i}: ${s.heading}`).join('\n');
+  const articleList = items.map((it, i) => `${i}: ${it.title}`).join('\n');
+
+  const prompt = `以下はナレッジファイルの見出し一覧と、分析対象記事の一覧です。
+各記事に対して、企画ヒント生成の参考になりそうな見出しのインデックス番号を選んでください（0〜2個、関連が薄ければ0個でよい）。
+
+【見出し一覧】
+${sectionList}
+
+【記事一覧】
+${articleList}
+
+以下の JSON 形式のみで返してください（説明不要、コードブロック不要）。記事インデックスをキーに、見出しインデックスの配列を値とする：
+{"0":[1],"1":[],"2":[0,2]}`;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 300,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    const data = await res.json();
+    const text = data.content[0].text.trim().replace(/```json|```/g, '').trim();
+    const map = JSON.parse(text);
+    return items.map((_, i) => (Array.isArray(map[String(i)]) ? map[String(i)] : []));
+  } catch {
+    return items.map(() => []);
+  }
+}
+
+// ─── 記事用のコンテキスト文字列を組み立て ────────────────────────
+function buildContextFor(coreSections, optionalSections, selectedIdx) {
+  const coreText = coreSections.map((s) => `【${s.heading}】\n${s.body}`).join('\n\n');
+  const picked = selectedIdx.map((i) => optionalSections[i]).filter(Boolean);
+  const pickedText = picked.map((s) => `【${s.heading}】\n${s.body}`).join('\n\n');
+  return [coreText, pickedText].filter(Boolean).join('\n\n---\n\n');
+}
+
 // ─── コンセプト・企画ヒント生成（Sonnet） ────────────────────────
-async function generateInsights(item, apiKey) {
+async function generateInsights(item, apiKey, context) {
   const body = await scrapeArticle(item.link);
-  const prompt = CONVERSION_PROMPT
-    .replace('{TITLE}', item.title)
-    .replace('{BODY}', body || `（本文取得不可。タイトルから推定）${item.title}`);
+  const prompt = buildConversionPrompt(item, body, context);
 
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -272,13 +413,6 @@ async function generateInsights(item, apiKey) {
     return null;
   }
 }
-
-// ─── TODO: Google Drive 整形済みフォルダ連携（後から追加）────────
-// async function fetchDriveContext(env) {
-//   環境変数: GOOGLE_DRIVE_API_KEY, GOOGLE_DRIVE_FOLDER_ID
-//   整形済みフォルダの .md ファイルを取得してコンテキスト文字列を返す
-//   実装後は GURUTTOPON_CONTEXT の代わりにこちらを使用
-// }
 
 // ─── KV 読み書き ──────────────────────────────────────────────
 const KV_KEY     = 'articles';
@@ -336,15 +470,40 @@ export default {
       const arrays   = await Promise.all(RSS_SOURCES.map(fetchRSS));
       const allItems = arrays.flat();
 
-      // 2. Haiku で D-1 テーマフィルタ
-      const filtered = await filterByD1(allItems, env.CLAUDE_API_KEY);
+      // 2. D-1テーマリストを Drive から取得（失敗時はフォールバック）
+      const d1Text  = await fetchD1Themes(env);
+      const d1Themes = d1Text || D1_THEMES_FALLBACK;
+
+      // 3. Haiku で D-1 テーマフィルタ
+      const filtered = await filterByD1(allItems, env.CLAUDE_API_KEY, d1Themes);
       const capped   = filtered.slice(0, 6); // 最大 6 件（コスト上限）
 
-      // 3. Sonnet でコンセプト・企画ヒント生成（並列）
-      const results    = await Promise.all(capped.map((item) => generateInsights(item, env.CLAUDE_API_KEY)));
+      // 4. ナレッジファイルを Drive から全件取得（失敗時はフォールバック）
+      const driveText = await fetchAllKnowledgeFiles(env);
+      let coreSections, optionalSections;
+      if (driveText) {
+        const sections = parseSections(driveText);
+        const split    = splitCoreAndOptional(sections);
+        coreSections     = split.core;
+        optionalSections = split.optional;
+      } else {
+        coreSections     = [{ heading: '基本情報', body: GURUTTOPON_CONTEXT }];
+        optionalSections = [];
+      }
+
+      // 5. 記事ごとに関連セクションを選択（バッチ1回・Haiku）
+      const selections = await selectRelevantSections(capped, optionalSections, env.CLAUDE_API_KEY);
+
+      // 6. Sonnet でコンセプト・企画ヒント生成（並列）
+      const results = await Promise.all(
+        capped.map((item, i) => {
+          const context = buildContextFor(coreSections, optionalSections, selections[i]);
+          return generateInsights(item, env.CLAUDE_API_KEY, context);
+        })
+      );
       const newArticles = results.filter(Boolean);
 
-      // 4. KV の既存記事とマージして保存
+      // 7. KV の既存記事とマージして保存
       const existing = await loadFromKV(env);
       const merged   = mergeArticles(existing, newArticles);
       await saveToKV(env, merged);
