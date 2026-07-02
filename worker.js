@@ -14,13 +14,17 @@
 //   よってシステム追記層（ストック）は Docs ではなく KV に置く。人間編集層のみ Docs。
 
 // ─── RSS ソース定義 ────────────────────────────────────────────
+// 【2026/07 見直し】Web担当者Forum・btrax Blogは技術的には生きているが、
+// 内容がD-1除外基準（IT・技術動向、デザイン経営論）と構造的に相性が悪く
+// 実績ゼロだったため除外。流通ニュース・Yahoo!ビジネスは値上げ・決算等の
+// 定型発表が多いため除外。MarkeZine・ITmedia マーケティングは旧v1で
+// 使っていたが、URLが変わって配信が死んでいただけだったため、正しい
+// URLで復活（内容の質は高いことを確認済み）。
 const RSS_SOURCES = [
   { name: 'AdverTimes',        url: 'https://www.advertimes.com/feed/' },
   { name: 'DIGIDAY Japan',     url: 'https://digiday.jp/feed/' },
-  { name: 'Web担当者Forum',     url: 'https://webtan.impress.co.jp/rss.xml' },
-  { name: 'btrax Blog',        url: 'https://blog.btrax.com/jp/feed/' },
-  { name: 'Yahoo!ビジネス',     url: 'https://news.yahoo.co.jp/rss/topics/business.xml' },
-  { name: '流通ニュース',        url: 'https://www.ryutsuu.biz/feed' },
+  { name: 'MarkeZine',         url: 'https://markezine.jp/rss/new/20/index.xml' },
+  { name: 'ITmedia マーケティング', url: 'https://rss.itmedia.co.jp/rss/2.0/marketing.xml' },
 ];
 
 // ─── CORS ────────────────────────────────────────────────────
@@ -153,12 +157,21 @@ ${body || `（本文取得不可。タイトルから推定）${item.title}`}
 
 ---
 
+上記の「事業課題」「2026年度優先事項（スーパーの販促費確保／新規会員獲得・パッシブ層再活性化）」
+「ユーザーインサイト」と、この記事の内容を具体的に接続して考えてください。
+記事とぐるっとポンの共通点を表面的に見つけるだけでなく、「この記事の核心的な設計・意思決定が、
+ぐるっとポンのどの数値・どの課題を動かせるか」まで踏み込むこと。
+接続が弱く、こじつけになると感じる場合は、無理に強いヒントを作らず、hint に率直にその旨を
+書いてよい（例：「直接の転用は難しいが、〜の観点は参考になる」）。
+
 以下の項目を JSON 形式で出力してください。Markdown コードブロックは使わず JSON のみ返してください。
 
 {
   "summary": "記事の概要（何があったか）。2〜3文、150字以内。具体的な数字・企業名を含めること。",
   "concept": "この事例から抽出できる転用可能な構造・原理。「なぜ機能するか」の本質を100字以内で。抽象論ではなく設計のポイントを明記すること。",
-  "hint": "ぐるっとポンへの具体的な企画ヒント。施策名・対象ユーザー・期待効果を含めて150字以内で。こじつけではなく構造的に転用可能なものを。",
+  "priorityFit": "この事例が2026年度優先事項のどちらに主に貢献するか。「スーパーの販促費確保」または「新規会員獲得・パッシブ層再活性化」のいずれかで一言。どちらとも言えない場合は「該当薄い」と正直に書く。",
+  "hint": "ぐるっとポンへの具体的な企画ヒント。施策名・対象ユーザー・期待効果を含めて150字以内で。こじつけではなく構造的に転用可能なものを。上記のユーザーインサイトの具体的な数値・課題と接続すること。",
+  "supermarketPitch": "この企画をスーパー側に提案するとしたら、スーパー側のどんな課題（集客・自社ポイント活用・売上等）と一致するか。1〜2文で。事業優先度が「スーパーの販促費確保」に該当しない場合は空文字でよい。",
   "theme": "最も関連するテーマID（retail/tieup/ooh/passive/loyalty/gamification/campaign/target/recycle/points のいずれか1つ）",
   "themeLabel": "テーマの短い日本語名（例：ロイヤルティ設計）",
   "novelty": "企画の種としての価値を表す1〜5の整数（数値のみ）。5＝「なぜ？」と驚くほど意外で、構造を転用すれば強い企画になる戦略事例。3＝参考にはなる一般的な事例。1＝値上げ告知・業績速報・背景説明のない通常の新商品告知など定型的な発表。企画の種として本当に価値があるものだけに4以上を付けること。"
@@ -341,54 +354,17 @@ function splitCoreAndOptional(sections) {
   return { core, optional };
 }
 
-// ─── 記事ごとに関連セクションを Haiku で選択（バッチ1回で全記事分） ─
-async function selectRelevantSections(items, optionalSections, apiKey) {
-  if (!optionalSections.length || !items.length) return items.map(() => []);
-
-  const sectionList = optionalSections.map((s, i) => `${i}: ${s.heading}`).join('\n');
-  const articleList = items.map((it, i) => `${i}: ${it.title}`).join('\n');
-
-  const prompt = `以下はナレッジファイルの見出し一覧と、分析対象記事の一覧です。
-各記事に対して、企画ヒント生成の参考になりそうな見出しのインデックス番号を選んでください（0〜2個、関連が薄ければ0個でよい）。
-
-【見出し一覧】
-${sectionList}
-
-【記事一覧】
-${articleList}
-
-以下の JSON 形式のみで返してください（説明不要、コードブロック不要）。記事インデックスをキーに、見出しインデックスの配列を値とする：
-{"0":[1],"1":[],"2":[0,2]}`;
-
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 300,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-    });
-    const data = await res.json();
-    const text = data.content[0].text.trim().replace(/```json|```/g, '').trim();
-    const map = JSON.parse(text);
-    return items.map((_, i) => (Array.isArray(map[String(i)]) ? map[String(i)] : []));
-  } catch {
-    return items.map(() => []);
-  }
-}
-
-// ─── 記事用のコンテキスト文字列を組み立て ────────────────────────
-function buildContextFor(coreSections, optionalSections, selectedIdx) {
+// ─── 記事ごとのコンテキスト構築 ──────────────────────────────────
+// 【方針転換】以前はタイトルだけを見て関連セクションを0〜2個に絞る
+// Haiku呼び出し（selectRelevantSections）を挟んでいたが、実験レポート
+// （0618情報収集精度比較）により「ナレッジ・アンケート・D-1テーマを
+// 毎回全部渡す」ことが精度向上の決め手と判明したため廃止する。
+// ナレッジ量はドキュメント数本程度でコスト的にも間引く必要がないため、
+// 常に基本情報＋全オプションセクションをまとめて渡す。
+function buildContextFor(coreSections, optionalSections) {
   const coreText = coreSections.map((s) => `【${s.heading}】\n${s.body}`).join('\n\n');
-  const picked = selectedIdx.map((i) => optionalSections[i]).filter(Boolean);
-  const pickedText = picked.map((s) => `【${s.heading}】\n${s.body}`).join('\n\n');
-  return [coreText, pickedText].filter(Boolean).join('\n\n---\n\n');
+  const optionalText = optionalSections.map((s) => `【${s.heading}】\n${s.body}`).join('\n\n');
+  return [coreText, optionalText].filter(Boolean).join('\n\n---\n\n');
 }
 
 // ─── コンセプト・企画ヒント生成（Sonnet） ────────────────────────
@@ -571,13 +547,11 @@ export default {
         optionalSections = [];
       }
 
-      // 5. 記事ごとに関連セクションを選択（バッチ1回・Haiku）
-      const selections = await selectRelevantSections(capped, optionalSections, env.CLAUDE_API_KEY);
-
-      // 6. Sonnet でコンセプト・企画ヒント・種スコア生成（並列）
+      // 5. Sonnet でコンセプト・企画ヒント・種スコア生成（並列）
+      // ナレッジは記事ごとに絞り込まず、毎回コア＋オプション全セクションを渡す
       const results = await Promise.all(
-        capped.map((item, i) => {
-          const context = buildContextFor(coreSections, optionalSections, selections[i]);
+        capped.map((item) => {
+          const context = buildContextFor(coreSections, optionalSections);
           return generateInsights(item, env.CLAUDE_API_KEY, context);
         })
       );
