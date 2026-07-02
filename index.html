@@ -104,6 +104,7 @@
   .badge-source-itmedia     { background: #EAF3DE; color: #27500A; }
   .badge-source-default     { background: #f0ece8; color: #666; }
   .badge-theme { background: #f5f4f1; color: #666; }
+  .badge-novelty { background: #FBEAF0; color: #72243E; }
   .card-date { font-size: 10px; color: #aaa; margin-left: auto; }
 
   .card-title {
@@ -165,6 +166,18 @@
     background: #E1F5EE;
     border-radius: 8px;
   }
+  .pitch-block {
+    font-size: 12px; color: #633806; line-height: 1.75;
+    padding: 9px 12px;
+    background: #FAEEDA;
+    border-radius: 8px;
+  }
+  .priority-tag {
+    display: inline-block;
+    font-size: 10px; font-weight: 500;
+    color: #0C447C; background: #E6F1FB;
+    padding: 3px 10px; border-radius: 99px;
+  }
 
   /* ─ エラー / 空状態 ─ */
   .empty {
@@ -201,7 +214,7 @@
     <span class="dot">·</span>
     <span><span id="articleCount">0</span> 件</span>
     <span class="dot">·</span>
-    <span>AdverTimes · MarkeZine · DIGIDAY Japan · ITmedia Marketing</span>
+    <span id="sourceList"><!-- JSで実際のRSS_SOURCESに同期して描画 --></span>
     <span class="progress" id="progressMsg" style="display:none;"></span>
   </div>
 
@@ -229,6 +242,11 @@
 // GitHub Pages の index.html をデプロイ後、WORKER_URL を自分の Cloudflare Worker URL に変更
 const WORKER_URL = 'https://flat-wildflower-5902.k-tochizawa.workers.dev';
 
+// ─── 実際のRSS構成（worker.js の RSS_SOURCES と必ず同期させる）─────
+// 【2026/07 見直し】worker.js側のソース入れ替えに合わせて更新。
+// ステータスバーの表示とバッジ色をここだけ直せば同期できるようにする。
+const ACTIVE_SOURCES = ['AdverTimes', 'DIGIDAY Japan', 'MarkeZine', 'ITmedia マーケティング'];
+
 // ─── テーマ定義 ──────────────────────────────────────────────────
 const THEMES = [
   { id: 'all',          label: 'すべて' },
@@ -246,10 +264,10 @@ const THEMES = [
 
 // ─── ソースバッジのスタイルマップ ────────────────────────────────
 function sourceBadgeClass(source) {
-  if (source.includes('AdverTimes'))        return 'badge-source-advertimes';
-  if (source.includes('MarkeZine'))         return 'badge-source-markezine';
-  if (source.includes('DIGIDAY'))           return 'badge-source-digiday';
-  if (source.includes('ITmedia'))           return 'badge-source-itmedia';
+  if (source.includes('AdverTimes'))  return 'badge-source-advertimes';
+  if (source.includes('MarkeZine'))   return 'badge-source-markezine';
+  if (source.includes('DIGIDAY'))     return 'badge-source-digiday';
+  if (source.includes('ITmedia'))     return 'badge-source-itmedia';
   return 'badge-source-default';
 }
 
@@ -258,6 +276,11 @@ let articles   = [];
 let activeTheme = 'all';
 let selectedId  = null;
 let loading     = false;
+
+// ─── ステータスバーのソース表示（実配信構成と同期） ─────────────────
+function renderSourceList() {
+  document.getElementById('sourceList').textContent = ACTIVE_SOURCES.join(' · ');
+}
 
 // ─── テーマフィルター描画 ─────────────────────────────────────────
 function renderFilters() {
@@ -312,6 +335,7 @@ function renderGrid() {
           <div class="card-meta">
             <span class="badge ${sourceBadgeClass(a.source)}">${a.source}</span>
             <span class="badge badge-theme">${a.themeLabel || ''}</span>
+            ${a.novelty ? `<span class="badge badge-novelty">種${a.novelty}</span>` : ''}
             <span class="card-date">${a.date}</span>
           </div>
           <div class="card-title">${esc(a.title)}</div>
@@ -337,6 +361,7 @@ function renderGrid() {
             <div class="detail-title">${esc(a.title)}</div>
             <button class="detail-close" onclick="selectCard('${a.id}')" aria-label="閉じる">×</button>
           </div>
+          ${a.priorityFit ? `<div><span class="priority-tag">事業優先度：${esc(a.priorityFit)}</span></div>` : ''}
           <div class="detail-summary">${esc(a.summary)}</div>
           ${a.url ? `<a class="detail-link" href="${esc(a.url)}" target="_blank" rel="noopener">元記事を読む →</a>` : ''}
           <div>
@@ -347,6 +372,11 @@ function renderGrid() {
             <div class="section-label">ぐるっとポンへの企画ヒント</div>
             <div class="hint-block">${esc(a.hint)}</div>
           </div>
+          ${a.supermarketPitch ? `
+          <div>
+            <div class="section-label">スーパー提案への接続</div>
+            <div class="pitch-block">${esc(a.supermarketPitch)}</div>
+          </div>` : ''}
         </div>`;
     }
   }
@@ -465,7 +495,8 @@ function esc(str) {
     .replace(/"/g, '&quot;');
 }
 
-// ─── 初期化：フィルター描画 → 保存済み記事を読み込む ─────────────
+// ─── 初期化：ソース表示 → フィルター描画 → 保存済み記事を読み込む ────
+renderSourceList();
 renderFilters();
 loadSaved();
 </script>
