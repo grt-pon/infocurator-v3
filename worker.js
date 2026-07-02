@@ -3,6 +3,15 @@
 // 環境変数（任意）: GOOGLE_DRIVE_D1_FILE_ID   … 00_D1テーマリスト（Google Docs）のファイルID
 // 環境変数（任意）: GOOGLE_DRIVE_FILE_IDS     … ナレッジファイルのファイルID（カンマ区切りで複数可）
 // ※ Drive 環境変数が未設定の場合はworker.js内のフォールバック固定文を使用
+//
+// ── 双方向化（今回の変更点）──────────────────────────────────
+// ① が見つけた良質な事例を「収集事例ストック」として KV に自動蓄積する。
+//   - ダッシュボード用の articles（100件で古いものから消える）とは別キー stock に保存
+//   - Sonnet が付与する novelty（種スコア 1〜5）が閾値以上のものを自動昇格
+//   - ?stock=1        … ストックを JSON で取得（将来の②企画立案エージェントが読む先）
+//   - ?promote=<id>   … articles 内の記事を手動でストックに昇格（保存ボタン用・補助）
+// ※ Drive はサービスアカウントキー発行が組織ポリシーで不可のため「書き込み」不可。
+//   よってシステム追記層（ストック）は Docs ではなく KV に置く。人間編集層のみ Docs。
 
 // ─── RSS ソース定義 ────────────────────────────────────────────
 const RSS_SOURCES = [
@@ -20,6 +29,9 @@ const CORS = {
   'Access-Control-Allow-Methods': 'GET, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
 };
+
+// ─── 種スコアの自動昇格しきい値（novelty がこれ以上ならストックへ）─
+const STOCK_PROMOTE_THRESHOLD = 4;
 
 // ─── ぐるっとポン コンテキスト（フォールバック・固定情報）────────
 // Google Drive 整形済みフォルダ連携が完成するまでここで管理
@@ -102,9 +114,17 @@ const D1_THEMES_FALLBACK = `有益な基準：
 - 富裕層・高価格帯向け
 - IT・テクノロジー系の技術動向
 - 海外のみで国内転用困難
-- 若年層向けIPコンテンツ`;
+- 若年層向けIPコンテンツ
+- 単純な値上げ・価格改定の告知のみのもの
+- 決算・月次売上・既存店前年比などの業績速報のみのもの
+- 戦略的な背景や意図の説明がない、通常の新商品・新店舗の告知のみのもの
+
+※定型的な発表であっても、企業の意思決定の理由や「なぜそれが機能するのか」が読み取れる場合は採用してよい。`;
 
 function buildD1FilterPrompt(d1Themes) {
+  // 有益な基準・除外基準（定型発表の除外を含む）はすべて Drive の
+  // 01_テーマリストドキュメント側で管理する。コード側にテーマ判定の
+  // 中身を持たせない（事業の変化に合わせてDocsだけ書き換えれば良い状態を保つ）。
   return `あなたはマーケティング情報のフィルタリングAIです。
 以下の記事タイトルリストを評価し、ぐるっとポン（リサイクルポイントアプリ、40〜60代主婦・ファミリー層向け）の
 マーケティング担当者にとって企画立案の参考になる記事のインデックス番号のみを返してください。
@@ -133,14 +153,15 @@ ${body || `（本文取得不可。タイトルから推定）${item.title}`}
 
 ---
 
-以下の4点を JSON 形式で出力してください。Markdown コードブロックは使わず JSON のみ返してください。
+以下の項目を JSON 形式で出力してください。Markdown コードブロックは使わず JSON のみ返してください。
 
 {
   "summary": "記事の概要（何があったか）。2〜3文、150字以内。具体的な数字・企業名を含めること。",
   "concept": "この事例から抽出できる転用可能な構造・原理。「なぜ機能するか」の本質を100字以内で。抽象論ではなく設計のポイントを明記すること。",
   "hint": "ぐるっとポンへの具体的な企画ヒント。施策名・対象ユーザー・期待効果を含めて150字以内で。こじつけではなく構造的に転用可能なものを。",
   "theme": "最も関連するテーマID（retail/tieup/ooh/passive/loyalty/gamification/campaign/target/recycle/points のいずれか1つ）",
-  "themeLabel": "テーマの短い日本語名（例：ロイヤルティ設計）"
+  "themeLabel": "テーマの短い日本語名（例：ロイヤルティ設計）",
+  "novelty": "企画の種としての価値を表す1〜5の整数（数値のみ）。5＝「なぜ？」と驚くほど意外で、構造を転用すれば強い企画になる戦略事例。3＝参考にはなる一般的な事例。1＝値上げ告知・業績速報・背景説明のない通常の新商品告知など定型的な発表。企画の種として本当に価値があるものだけに4以上を付けること。"
 }`;
 }
 
@@ -393,6 +414,11 @@ async function generateInsights(item, apiKey, context) {
     const text = data.content[0].text.trim().replace(/```json|```/g, '').trim();
     const insights = JSON.parse(text);
 
+    // novelty を数値に正規化（1〜5、範囲外や欠損は 0 として扱う）
+    let novelty = Number(insights.novelty);
+    if (!Number.isFinite(novelty)) novelty = 0;
+    novelty = Math.max(0, Math.min(5, Math.round(novelty)));
+
     // pubDate を MM/DD 形式に変換
     let dateStr = '';
     if (item.pubDate) {
@@ -410,15 +436,16 @@ async function generateInsights(item, apiKey, context) {
       url:     item.link,
       date:    dateStr,
       ...insights,
+      novelty, // 正規化した値で上書き
     };
   } catch {
     return null;
   }
 }
 
-// ─── KV 読み書き ──────────────────────────────────────────────
-const KV_KEY     = 'articles';
-const KV_MAX     = 100; // 保存上限件数
+// ─── KV 読み書き（ダッシュボード用記事）──────────────────────────
+const KV_KEY = 'articles';
+const KV_MAX = 100; // 保存上限件数
 
 async function loadFromKV(env) {
   try {
@@ -440,6 +467,35 @@ function mergeArticles(existing, incoming) {
   return [...novel, ...existing].slice(0, KV_MAX);
 }
 
+// ─── KV 読み書き（収集事例ストック ＝ 企画の種の棚）───────────────
+// articles とは別キー。記事が入れ替わっても種は消えず棚として残る。
+// 将来の②企画立案エージェントが ?stock=1 で読み込む先。
+const STOCK_KEY = 'stock';
+const STOCK_MAX = 300; // ストックの保持上限（棚なので多め）
+
+async function loadStock(env) {
+  try {
+    const raw = await env.ARTICLES_KV.get(STOCK_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveStock(env, stock) {
+  await env.ARTICLES_KV.put(STOCK_KEY, JSON.stringify(stock));
+}
+
+// ストックへ昇格：URL で重複除去し promotedAt を付与。先頭に追加、上限で打ち切り
+function mergeStock(existing, incoming) {
+  const seen = new Set(existing.map((a) => a.url));
+  const now = new Date().toISOString();
+  const novel = incoming
+    .filter((a) => a.url && !seen.has(a.url))
+    .map((a) => ({ ...a, promotedAt: a.promotedAt || now }));
+  return [...novel, ...existing].slice(0, STOCK_MAX);
+}
+
 // ─── メインハンドラ ───────────────────────────────────────────
 export default {
   async fetch(request, env) {
@@ -452,18 +508,40 @@ export default {
 
     const { searchParams } = new URL(request.url);
     const isCollect = searchParams.get('collect') === '1';
+    const isStock   = searchParams.get('stock') === '1';
+    const promoteId = searchParams.get('promote');
+
+    const json = (obj, status = 200) =>
+      new Response(JSON.stringify(obj), {
+        status,
+        headers: { ...CORS, 'Content-Type': 'application/json' },
+      });
 
     try {
+      // ── ストックを返す（将来の②が読む先／ダッシュボードの棚表示用）──
+      if (isStock) {
+        const stock = await loadStock(env);
+        return json({ stock, total: stock.length });
+      }
+
+      // ── 手動昇格：articles 内の記事を id 指定でストックへ（保存ボタン用）──
+      if (promoteId) {
+        const articles = await loadFromKV(env);
+        const target = articles.find((a) => a.id === promoteId);
+        if (!target) return json({ error: '対象記事が見つかりません', promoted: false }, 404);
+        const stock = await loadStock(env);
+        const merged = mergeStock(stock, [target]);
+        await saveStock(env, merged);
+        return json({ promoted: true, stockTotal: merged.length });
+      }
+
       // ── 保存済み記事を返すだけ（ページ初期表示）──
       if (!isCollect) {
         const saved = await loadFromKV(env);
-        return new Response(
-          JSON.stringify({ articles: saved, fetchedAt: null, total: saved.length }),
-          { headers: { ...CORS, 'Content-Type': 'application/json' } }
-        );
+        return json({ articles: saved, fetchedAt: null, total: saved.length });
       }
 
-      // ── 新規収集 → KV に保存 → 全件返却 ──
+      // ── 新規収集 → KV に保存 → 種を自動昇格 → 全件返却 ──
       if (!env.CLAUDE_API_KEY) {
         throw new Error('CLAUDE_API_KEY が設定されていません');
       }
@@ -473,10 +551,10 @@ export default {
       const allItems = arrays.flat();
 
       // 2. D-1テーマリストを Drive から取得（失敗時はフォールバック）
-      const d1Text  = await fetchD1Themes(env);
+      const d1Text   = await fetchD1Themes(env);
       const d1Themes = d1Text || D1_THEMES_FALLBACK;
 
-      // 3. Haiku で D-1 テーマフィルタ
+      // 3. Haiku で D-1 テーマフィルタ（定型発表は除外）
       const filtered = await filterByD1(allItems, env.CLAUDE_API_KEY, d1Themes);
       const capped   = filtered.slice(0, 6); // 最大 6 件（コスト上限）
 
@@ -496,7 +574,7 @@ export default {
       // 5. 記事ごとに関連セクションを選択（バッチ1回・Haiku）
       const selections = await selectRelevantSections(capped, optionalSections, env.CLAUDE_API_KEY);
 
-      // 6. Sonnet でコンセプト・企画ヒント生成（並列）
+      // 6. Sonnet でコンセプト・企画ヒント・種スコア生成（並列）
       const results = await Promise.all(
         capped.map((item, i) => {
           const context = buildContextFor(coreSections, optionalSections, selections[i]);
@@ -505,25 +583,33 @@ export default {
       );
       const newArticles = results.filter(Boolean);
 
-      // 7. KV の既存記事とマージして保存
+      // 7. ダッシュボード用 articles にマージして保存（従来通り・100件上限）
       const existing = await loadFromKV(env);
       const merged   = mergeArticles(existing, newArticles);
       await saveToKV(env, merged);
 
-      return new Response(
-        JSON.stringify({
-          articles:   merged,
-          fetchedAt:  new Date().toISOString(),
-          newCount:   newArticles.length,
-          total:      merged.length,
-        }),
-        { headers: { ...CORS, 'Content-Type': 'application/json' } }
-      );
+      // 8. 【双方向】種スコアが閾値以上のものを収集事例ストックへ自動昇格
+      const promoted = newArticles.filter((a) => Number(a.novelty) >= STOCK_PROMOTE_THRESHOLD);
+      let stockTotal = 0;
+      if (promoted.length) {
+        const existingStock = await loadStock(env);
+        const mergedStock   = mergeStock(existingStock, promoted);
+        await saveStock(env, mergedStock);
+        stockTotal = mergedStock.length;
+      } else {
+        stockTotal = (await loadStock(env)).length;
+      }
+
+      return json({
+        articles:    merged,
+        fetchedAt:   new Date().toISOString(),
+        newCount:    newArticles.length,
+        promotedCount: promoted.length, // 今回ストックに昇格した件数
+        stockTotal,                     // ストック累計
+        total:       merged.length,
+      });
     } catch (err) {
-      return new Response(
-        JSON.stringify({ error: err.message, articles: [] }),
-        { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } }
-      );
+      return json({ error: err.message, articles: [] }, 500);
     }
   },
 };
