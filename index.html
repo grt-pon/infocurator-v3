@@ -296,6 +296,21 @@ function setTheme(id) {
   renderGrid();
 }
 
+// ─── カード削除：Worker の ?delete=<id> を呼んで即座に一覧から除去 ──
+async function deleteArticle(id) {
+  if (!confirm('この記事を削除しますか？')) return;
+  try {
+    const res  = await fetch(`${WORKER_URL}?delete=${encodeURIComponent(id)}`);
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+    articles = articles.filter(a => a.id !== id);
+    if (selectedId === id) selectedId = null;
+    renderGrid();
+  } catch (err) {
+    alert(`削除に失敗しました：${err.message}`);
+  }
+}
+
 // ─── カード選択 ──────────────────────────────────────────────────
 function selectCard(id) {
   selectedId = (selectedId === id) ? null : id;
@@ -359,6 +374,7 @@ function renderGrid() {
         <div class="detail">
           <div class="detail-header">
             <div class="detail-title">${esc(a.title)}</div>
+            <button class="detail-close" onclick="deleteArticle('${a.id}')" aria-label="削除" title="この記事を削除">🗑</button>
             <button class="detail-close" onclick="selectCard('${a.id}')" aria-label="閉じる">×</button>
           </div>
           ${a.priorityFit ? `<div><span class="priority-tag">事業優先度：${esc(a.priorityFit)}</span></div>` : ''}
