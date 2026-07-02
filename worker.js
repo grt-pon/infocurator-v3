@@ -153,7 +153,7 @@ ${context}
 【分析対象記事】
 タイトル：${item.title}
 本文：
-${body || `（本文取得不可。タイトルから推定）${item.title}`}
+${body}
 
 ---
 
@@ -368,8 +368,20 @@ function buildContextFor(coreSections, optionalSections) {
 }
 
 // ─── コンセプト・企画ヒント生成（Sonnet） ────────────────────────
+// 本文が十分に取得できていない記事（会員限定・ペイウォール等）は、
+// 「取得不可のため判断できません」という無価値な出力を防ぐため、
+// Sonnet に投げる前にスキップする（コスト削減にもなる）。
+const MIN_BODY_LENGTH = 300; // これ未満は「実質本文なし」とみなす
+
 async function generateInsights(item, apiKey, context) {
   const body = await scrapeArticle(item.link);
+
+  // 本文が短すぎる＝会員限定・ペイウォール等で中身が取れていない可能性が高い。
+  // タイトルだけで無理に判断させても質の低いカードが増えるだけなのでスキップ。
+  if (body.length < MIN_BODY_LENGTH) {
+    return null;
+  }
+
   const prompt = buildConversionPrompt(item, body, context);
 
   try {
@@ -394,6 +406,12 @@ async function generateInsights(item, apiKey, context) {
     let novelty = Number(insights.novelty);
     if (!Number.isFinite(novelty)) novelty = 0;
     novelty = Math.max(0, Math.min(5, Math.round(novelty)));
+
+    // 種スコアが極端に低い（定型発表・実質価値なし）ものは、
+    // D-1フィルタをすり抜けてしまった場合の最終防衛ラインとして除外する。
+    if (novelty <= 1) {
+      return null;
+    }
 
     // pubDate を MM/DD 形式に変換
     let dateStr = '';
