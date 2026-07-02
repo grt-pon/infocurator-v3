@@ -335,7 +335,7 @@ function renderGrid() {
           <div class="card-meta">
             <span class="badge ${sourceBadgeClass(a.source)}">${a.source}</span>
             <span class="badge badge-theme">${a.themeLabel || ''}</span>
-            ${a.novelty ? `<span class="badge badge-novelty">種${a.novelty}</span>` : ''}
+            ${a.novelty ? `<span class="badge badge-novelty" title="企画の種としての価値（1〜5、Sonnetによる評価）">企画の種 ${a.novelty}/5</span>` : ''}
             <span class="card-date">${a.date}</span>
           </div>
           <div class="card-title">${esc(a.title)}</div>
