@@ -10,6 +10,9 @@
 //   - Sonnet が付与する novelty（種スコア 1〜5）が閾値以上のものを自動昇格
 //   - ?stock=1        … ストックを JSON で取得（将来の②企画立案エージェントが読む先）
 //   - ?promote=<id>   … articles 内の記事を手動でストックに昇格（保存ボタン用・補助）
+//   - ?delete=<id>    … articles から特定の記事を1件削除
+//   - ?cleanup=1      … 本文が読めていない等の低品質記事をまとめて削除
+//   - ?reset=1        … articles を全消去（ソース・フィルタ刷新時のリセット用）
 // ※ Drive はサービスアカウントキー発行が組織ポリシーで不可のため「書き込み」不可。
 //   よってシステム追記層（ストック）は Docs ではなく KV に置く。人間編集層のみ Docs。
 
@@ -461,6 +464,22 @@ function mergeArticles(existing, incoming) {
   return [...novel, ...existing].slice(0, KV_MAX);
 }
 
+// ─── 低品質記事の検出（クリーンアップ用） ────────────────────────
+// 「本文取得不可」ガード導入より前に保存された古い記事や、それをすり抜けた
+// 記事を、あとから見つけて消せるようにするための判定。
+// - novelty が未設定（旧仕様の記事）または 1 以下
+// - concept/hint の文面に「取得できていない」等の判断放棄パターンが含まれる
+const LOW_QUALITY_PATTERNS = [
+  '取得不可', '取得できて', '不明', '判断できない', '判断が難しい',
+  '推察される', '詳細不明', '会員限定', '会員向けコンテンツ',
+];
+
+function isLowQualityArticle(a) {
+  if (a.novelty === undefined || a.novelty === null || Number(a.novelty) <= 1) return true;
+  const text = `${a.concept || ''}${a.hint || ''}`;
+  return LOW_QUALITY_PATTERNS.some((p) => text.includes(p));
+}
+
 // ─── KV 読み書き（収集事例ストック ＝ 企画の種の棚）───────────────
 // articles とは別キー。記事が入れ替わっても種は消えず棚として残る。
 // 将来の②企画立案エージェントが ?stock=1 で読み込む先。
@@ -504,6 +523,9 @@ export default {
     const isCollect = searchParams.get('collect') === '1';
     const isStock   = searchParams.get('stock') === '1';
     const promoteId = searchParams.get('promote');
+    const deleteId  = searchParams.get('delete');
+    const isCleanup = searchParams.get('cleanup') === '1';
+    const isReset   = searchParams.get('reset') === '1';
 
     const json = (obj, status = 200) =>
       new Response(JSON.stringify(obj), {
@@ -527,6 +549,32 @@ export default {
         const merged = mergeStock(stock, [target]);
         await saveStock(env, merged);
         return json({ promoted: true, stockTotal: merged.length });
+      }
+
+      // ── 1件削除：id 指定で articles から除去 ──
+      if (deleteId) {
+        const articles = await loadFromKV(env);
+        const remaining = articles.filter((a) => a.id !== deleteId);
+        if (remaining.length === articles.length) {
+          return json({ error: '対象記事が見つかりません', deleted: false }, 404);
+        }
+        await saveToKV(env, remaining);
+        return json({ deleted: true, total: remaining.length });
+      }
+
+      // ── 一括クリーンアップ：本文が読めていない等の低品質記事をまとめて除去 ──
+      if (isCleanup) {
+        const articles = await loadFromKV(env);
+        const remaining = articles.filter((a) => !isLowQualityArticle(a));
+        const removedCount = articles.length - remaining.length;
+        await saveToKV(env, remaining);
+        return json({ removedCount, total: remaining.length });
+      }
+
+      // ── 全消去：保存済み記事を空にする（ソース・フィルタ刷新時のリセット用）──
+      if (isReset) {
+        await saveToKV(env, []);
+        return json({ reset: true, total: 0 });
       }
 
       // ── 保存済み記事を返すだけ（ページ初期表示）──
